@@ -1,0 +1,32 @@
+name: VPN check (manual test)
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install requests
+
+      - name: Check IPv6 reachability of Fritzbox host
+        run: |
+          host=$(echo "$FRITZBOX_HOST" | sed -E 's#https?://##; s#:.*##')
+          echo "Resolving $host ..."
+          getent ahosts "$host" || true
+          curl -6 -v --max-time 10 "$FRITZBOX_HOST" || echo "IPv6 curl failed (see above)"
+        env:
+          FRITZBOX_HOST: ${{ secrets.FRITZBOX_HOST }}
+
+      - name: Run VPN status check
+        run: python3 fritzbox_vpn_status.py
+        env:
+          FRITZBOX_HOST: ${{ secrets.FRITZBOX_HOST }}
+          FRITZBOX_USER: ${{ secrets.FRITZBOX_USER }}
+          FRITZBOX_PASSWORD: ${{ secrets.FRITZBOX_PASSWORD }}

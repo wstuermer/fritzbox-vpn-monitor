@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 """Check one VPN connection's status on a FRITZ!Box via its remote HTTPS web UI (e.g. myfritz.net).
 
-Meant to be run repeatedly (cron, launchd, ...). Tracks consecutive failures in a
-small state file so a single flaky/reconnecting check doesn't trigger an alert.
+Meant to be run repeatedly (cron). Tracks consecutive failures in a small state
+file so a single flaky/reconnecting check doesn't trigger an alert, and pushes
+an ntfy notification when the failure threshold is crossed (and again on recovery).
 
-Setup:
-  export FRITZBOX_HOST="https://xxxxxxxxxxxxx.myfritz.net:PORT"   # no trailing slash
-  export FRITZBOX_USER="dein-fritzbox-benutzer"
-  export FRITZBOX_PASSWORD="dein-passwort"   # optional; wenn nicht gesetzt, wird interaktiv gefragt
-  export FRITZBOX_VPN_NAME="Leitstelle REK Drucker"   # optional, das ist der Default
-  export FRITZBOX_VPN_FAIL_THRESHOLD="3"              # optional, das ist der Default
+Required env vars:
+  FRITZBOX_HOST      https://xxxxxxxxxxxxx.myfritz.net:PORT   (no trailing slash)
+  FRITZBOX_USER
+  FRITZBOX_PASSWORD
 
-Run:
-  pip install requests
-  python3 fritzbox_vpn_status.py
+Optional env vars:
+  FRITZBOX_VPN_NAME          default "Leitstelle REK Drucker"
+  FRITZBOX_VPN_FAIL_THRESHOLD default "3"
+  FRITZBOX_VPN_STATE_FILE     default alongside this script
+  NTFY_URL                   default "https://ntfy.sh"
+  NTFY_TOPIC                  no default; if unset, no push is sent
 """
 import getpass
 import hashlib
@@ -33,9 +35,25 @@ STATE_FILE = os.environ.get(
     "FRITZBOX_VPN_STATE_FILE",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vpn_monitor_state.json"),
 )
+NTFY_URL = os.environ.get("NTFY_URL", "https://ntfy.sh")
+NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "")
 
 if not HOST or not USER:
     sys.exit("FRITZBOX_HOST und FRITZBOX_USER müssen gesetzt sein.")
+
+
+def notify(title, message, priority=3):
+    if not NTFY_TOPIC:
+        print(f"(kein NTFY_TOPIC gesetzt, würde senden: [{title}] {message})")
+        return
+    try:
+        requests.post(
+            NTFY_URL,
+            json={"topic": NTFY_TOPIC, "title": title, "message": message, "priority": priority},
+            timeout=10,
+        )
+    except requests.RequestException as e:
+        print(f"ntfy-Benachrichtigung fehlgeschlagen: {e}")
 
 
 def pbkdf2_response(challenge, password):
@@ -102,6 +120,11 @@ def main():
     if is_up:
         if state["alerting"]:
             print(f"OK: {TARGET_NAME!r} wieder verbunden (seit {target['connected_since']}s).")
+            notify(
+                "VPN wieder verbunden",
+                f"{TARGET_NAME} ist seit {target['connected_since']}s wieder verbunden.",
+                priority=3,
+            )
         else:
             print(f"OK: {TARGET_NAME!r} verbunden (seit {target['connected_since']}s).")
         state = {"consecutive_failures": 0, "alerting": False}
@@ -113,7 +136,13 @@ def main():
         )
         if state["consecutive_failures"] >= FAIL_THRESHOLD and not state["alerting"]:
             state["alerting"] = True
-            print("ALARM: Schwelle erreicht -> hier kommt im nächsten Schritt der ntfy-Push hin.")
+            print("ALARM: Schwelle erreicht, sende ntfy-Push.")
+            notify(
+                f"VPN getrennt: {TARGET_NAME}",
+                f"{TARGET_NAME} ist seit {state['consecutive_failures']} Checks in Folge nicht "
+                f"verbunden (state={target['state']!r}). Manuell in der Fritzbox pruefen.",
+                priority=5,
+            )
 
     save_state(state)
 

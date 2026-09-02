@@ -5,6 +5,10 @@ Meant to be run repeatedly (cron). Tracks consecutive failures in a small state
 file so a single flaky/reconnecting check doesn't trigger an alert, and pushes
 an ntfy notification when the failure threshold is crossed (and again on recovery).
 
+If the Fritzbox itself can't be reached at all (e.g. power outage), a separate
+debounced alert/recovery notification is sent for that, using the same failure
+threshold.
+
 Required env vars:
   FRITZBOX_HOST      https://xxxxxxxxxxxxx.myfritz.net:PORT   (no trailing slash)
   FRITZBOX_USER
@@ -95,9 +99,14 @@ def vpn_connections(session, sid):
 def load_state():
     try:
         with open(STATE_FILE) as f:
-            return json.load(f)
+            state = json.load(f)
     except FileNotFoundError:
-        return {"consecutive_failures": 0, "alerting": False}
+        state = {}
+    state.setdefault("consecutive_failures", 0)
+    state.setdefault("alerting", False)
+    state.setdefault("unreachable_failures", 0)
+    state.setdefault("unreachable_alerting", False)
+    return state
 
 
 def save_state(state):
@@ -106,15 +115,45 @@ def save_state(state):
 
 
 def main():
+    state = load_state()
     session = requests.Session()
-    sid = login(session)
 
-    connections = vpn_connections(session, sid)
+    try:
+        sid = login(session)
+        connections = vpn_connections(session, sid)
+    except (requests.RequestException, ET.ParseError, AttributeError) as e:
+        state["unreachable_failures"] += 1
+        print(
+            f"WARN: Fritzbox ({HOST}) nicht erreichbar ({e}), "
+            f"{state['unreachable_failures']}/{FAIL_THRESHOLD} Fehlschläge in Folge."
+        )
+        if state["unreachable_failures"] >= FAIL_THRESHOLD and not state["unreachable_alerting"]:
+            state["unreachable_alerting"] = True
+            print("ALARM: Fritzbox nicht erreichbar, sende ntfy-Push.")
+            notify(
+                "Fritzbox nicht erreichbar",
+                f"Die Fritzbox ({HOST}) ist seit {state['unreachable_failures']} Checks in Folge "
+                "nicht erreichbar (z. B. Stromausfall).",
+                priority=5,
+            )
+        save_state(state)
+        return
+
+    if state["unreachable_alerting"]:
+        print(f"OK: Fritzbox ({HOST}) wieder erreichbar.")
+        notify(
+            "Fritzbox wieder erreichbar",
+            f"Die Fritzbox ({HOST}) ist wieder erreichbar.",
+            priority=3,
+        )
+    state["unreachable_failures"] = 0
+    state["unreachable_alerting"] = False
+
     target = connections.get(TARGET_NAME)
     if target is None:
+        save_state(state)
         sys.exit(f"VPN-Verbindung {TARGET_NAME!r} nicht gefunden. Verfügbar: {list(connections)}")
 
-    state = load_state()
     is_up = target["state"] == "ready"
 
     if is_up:
@@ -127,7 +166,8 @@ def main():
             )
         else:
             print(f"OK: {TARGET_NAME!r} verbunden (seit {target['connected_since']}s).")
-        state = {"consecutive_failures": 0, "alerting": False}
+        state["consecutive_failures"] = 0
+        state["alerting"] = False
     else:
         state["consecutive_failures"] += 1
         print(

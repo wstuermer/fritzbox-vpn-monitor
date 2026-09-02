@@ -25,6 +25,12 @@ per periodischem Poll.
   niedrige Zehnersekunden) keine Fehlalarme erzeugen.
 - Bei Erreichen der Schwelle sowie bei Wiederherstellung: Push-Benachrichtigung
   via ntfy.sh (oder eine selbstgehostete ntfy-Instanz).
+- Ist die Fritzbox selbst nicht erreichbar (z. B. Stromausfall, Internetausfall
+  am Standort), schlagen Login bzw. Statusabfrage mit einem Netzwerkfehler fehl.
+  Das wird über dieselbe Schwellwert-/Debounce-Logik separat erkannt und löst
+  eigene Push-Benachrichtigungen aus: einmal bei Erreichen der Schwelle
+  ("Fritzbox nicht erreichbar") und einmal, wenn die Box wieder erreichbar ist
+  ("Fritzbox wieder erreichbar").
 
 ## Voraussetzungen
 
